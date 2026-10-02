@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Secrets - never commit these
+.env
+.env.*
+*.key
+*.pem
+service-account*.json
+credentials*.json
+
+# Runtime data (SQLite DB and uploaded evidence images)
+data/
+
+# Streamlit local secrets
+.streamlit/secrets.toml
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build / tooling
+*.log
+.pytest_cache/
