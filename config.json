@@ -1,0 +1,200 @@
+{
+ "rule_version": "rules-1.2",
+ "default_model": "gemini-3.5-flash-lite",
+ "gate": {
+  "id": "C22",
+  "camera": "CAM-C22-01",
+  "clearance_m": 3.0,
+  "zone_definition": "area within the configured clearance of the fuselage, engines and fuel points"
+ },
+ "thresholds": {
+  "min_confidence": 0.6,
+  "low_confidence": 0.75,
+  "phase_confidence": 0.6,
+  "single_frame_min_confidence": 0.8,
+  "persistence_frames": 2,
+  "suppress_minutes": 10,
+  "single_frame_max_severity": "High",
+  "verify": true
+ },
+ "severities": [
+  "Low",
+  "Medium",
+  "High",
+  "Critical"
+ ],
+ "phases": [
+  "Aircraft Arrival",
+  "Baggage Handling",
+  "Catering",
+  "Fueling",
+  "Boarding",
+  "Turnaround Completion",
+  "Pushback Preparation"
+ ],
+ "object_types": [
+  "gse",
+  "person",
+  "aircraft",
+  "obstruction"
+ ],
+ "gse_kinds": [
+  "baggage",
+  "catering",
+  "fuel",
+  "stairs",
+  "bridge",
+  "tug",
+  "lavatory",
+  "ground_power",
+  "other"
+ ],
+ "expected_gse": {
+  "Aircraft Arrival": [
+   "tug",
+   "ground_power"
+  ],
+  "Baggage Handling": [
+   "baggage",
+   "ground_power"
+  ],
+  "Catering": [
+   "catering",
+   "ground_power"
+  ],
+  "Fueling": [
+   "fuel",
+   "ground_power"
+  ],
+  "Boarding": [
+   "stairs",
+   "bridge",
+   "ground_power"
+  ],
+  "Turnaround Completion": [
+   "ground_power"
+  ],
+  "Pushback Preparation": [
+   "tug"
+  ]
+ },
+ "rules": [
+  {
+   "id": "SE-001",
+   "name": "Safety-zone intrusion",
+   "object": "person",
+   "condition": "in_zone",
+   "phases": [
+    "Fueling"
+   ],
+   "severity": {
+    "default": "Critical"
+   },
+   "zone": "restricted"
+  },
+  {
+   "id": "SE-002",
+   "name": "Unsafe GSE proximity",
+   "object": "gse",
+   "condition": "in_zone",
+   "phases": "*",
+   "severity": {
+    "default": "High",
+    "Fueling": "Critical"
+   },
+   "zone": "clearance",
+   "escalate_zone": "restricted"
+  },
+  {
+   "id": "SE-003",
+   "name": "Obstruction (FOD candidate)",
+   "object": "obstruction",
+   "condition": "present",
+   "phases": [
+    "Turnaround Completion",
+    "Pushback Preparation"
+   ],
+   "severity": {
+    "default": "Medium",
+    "Pushback Preparation": "High"
+   }
+  },
+  {
+   "id": "SE-004",
+   "name": "Restricted-area personnel",
+   "object": "person",
+   "condition": "in_zone",
+   "phases": [
+    "Aircraft Arrival",
+    "Boarding",
+    "Turnaround Completion",
+    "Pushback Preparation"
+   ],
+   "severity": {
+    "default": "Medium",
+    "Boarding": "High"
+   },
+   "zone": "restricted"
+  }
+ ],
+ "recommendations": {
+  "SE-001": [
+   "Visually verify whether anyone is inside the fueling safety zone.",
+   "Confirm fueling status with the fuel team lead.",
+   "Follow local fueling safety procedure."
+  ],
+  "SE-002": [
+   "Verify the equipment position against the required clearance.",
+   "Confirm whether the equipment is moving or parked.",
+   "Contact the equipment operator if needed."
+  ],
+  "SE-003": [
+   "Verify the object is real and whether it is in a critical path.",
+   "Confirm with the team lead whether it should be removed.",
+   "Record the outcome."
+  ],
+  "SE-004": [
+   "Verify whether the person is authorized for this area in this phase.",
+   "Confirm the person's task with the team lead.",
+   "Reassess before the next operation step."
+  ]
+ },
+ "dismiss_reasons": [
+  "False positive - routine activity",
+  "False positive - misidentified object",
+  "Not actionable",
+  "Other"
+ ],
+ "lifecycle": {
+  "Presented": [
+   "Acknowledged",
+   "Escalated",
+   "Dismissed"
+  ],
+  "Acknowledged": [
+   "Resolved",
+   "Escalated"
+  ],
+  "Escalated": [
+   "Resolved"
+  ],
+  "Dismissed": [
+   "Closed"
+  ],
+  "Resolved": [
+   "Closed"
+  ],
+  "Closed": [],
+  "Suppressed": []
+ },
+ "zones": {
+  "names": [
+   "clearance",
+   "restricted"
+  ],
+  "descriptions": {
+   "clearance": "ground area around the aircraft where equipment and people should not be unless servicing the aircraft",
+   "restricted": "inner no-go ground area close to engines, fuel points and landing gear"
+  }
+ }
+}

@@ -1,68 +1,44 @@
-import sqlite3, json, os, uuid, datetime as dt, random
+import sqlite3, json, os, uuid, datetime as dt
 import pandas as pd
+from rules import CFG, T
 DB = os.environ.get("RG_DB", "data/rampguard.db")
-os.makedirs(os.path.dirname(DB), exist_ok=True)
-os.makedirs("data/evidence", exist_ok=True)
-NEXT = {"Detected": ["Under Review", "Dismissed"], "Under Review": ["Acknowledged", "Dismissed"],
-        "Acknowledged": ["Investigating", "Resolved", "Dismissed"],
-        "Investigating": ["Resolved", "Dismissed"], "Resolved": [], "Dismissed": []}
+os.makedirs(os.path.dirname(DB), exist_ok=True); os.makedirs("data/evidence", exist_ok=True)
+NEXT = CFG["lifecycle"]
+COLS = "event_id ts gate camera phase phase_conf event_type rule_id severity confidence evidence status summary uncertainty checks notes resolution model_version rule_version duplicate_of".split()
 
 def now(): return dt.datetime.utcnow().isoformat(timespec="seconds")
 def conn():
     c = sqlite3.connect(DB); c.row_factory = sqlite3.Row; return c
-def df(sql, args=()):
-    with conn() as c: return pd.read_sql_query(sql, c, params=args)
-def run(sql, args=()):
-    with conn() as c: c.execute(sql, args)
-
+def df(sql, a=()):
+    with conn() as c: return pd.read_sql_query(sql, c, params=a)
+def run(sql, a=()):
+    with conn() as c: c.execute(sql, a)
 def init():
-    with conn() as c:
-        c.executescript("""
-        CREATE TABLE IF NOT EXISTS turnarounds(id INTEGER PRIMARY KEY, aircraft_id TEXT, stand_id TEXT,
-            phase TEXT, gse TEXT, clearance_m REAL);
-        CREATE TABLE IF NOT EXISTS events(event_id TEXT PRIMARY KEY, ts TEXT, aircraft_id TEXT, stand_id TEXT,
-            turnaround_phase TEXT, event_type TEXT, severity TEXT, confidence REAL, evidence TEXT,
-            rule_triggered TEXT, status TEXT, notes TEXT, resolution TEXT, ai_summary TEXT,
-            recommended_checks TEXT, gse_type TEXT);
-        CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, event_id TEXT, ts TEXT, status TEXT,
-            actor TEXT, note TEXT);""")
-        if c.execute("SELECT COUNT(*) FROM turnarounds").fetchone()[0] == 0: seed(c)
+    run(f"CREATE TABLE IF NOT EXISTS events({', '.join(COLS)}, PRIMARY KEY(event_id))" if False else
+        f"CREATE TABLE IF NOT EXISTS events({', '.join(c + (' TEXT PRIMARY KEY' if c == 'event_id' else '') for c in COLS)})")
+    run("CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY, event_id TEXT, ts TEXT, status TEXT, actor TEXT, note TEXT)")
+def log(eid, status, actor, note=""):
+    run("INSERT INTO history(event_id,ts,status,actor,note) VALUES(?,?,?,?,?)", (eid, now(), status, actor, note))
 
-def seed(c):
-    for r in [("UA146", "C22", "Baggage Handling", "Baggage Vehicle", 3.0), ("SQ322", "A05", "Boarding", "Passenger Stairs", 2.5),
-              ("AI101", "B14", "Fueling", "Fuel Truck", 5.0), ("EK510", "C07", "Turnaround Completion", "Tug", 3.0),
-              ("LH760", "A11", "Catering", "Catering Truck", 3.0)]:
-        c.execute("INSERT INTO turnarounds(aircraft_id,stand_id,phase,gse,clearance_m) VALUES(?,?,?,?,?)", r)
-    random.seed(7); base = dt.datetime.utcnow()
-    spec = [("C22", "Baggage Handling", "SE-002 Unsafe GSE proximity", "Baggage Vehicle", "High")] * 7 + [
-        ("A05", "Boarding", "SE-004 Restricted-area personnel", "Passenger Stairs", "High"),
-        ("B14", "Fueling", "SE-001 Safety-zone intrusion", "Fuel Truck", "Critical"),
-        ("C07", "Turnaround Completion", "SE-003 Obstruction", "Tug", "Medium"),
-        ("A11", "Catering", "SE-002 Unsafe GSE proximity", "Catering Truck", "High")]
-    for i, (st_, ph, et, gse, sev) in enumerate(spec):
-        ts = base - dt.timedelta(days=30 - i * 2, minutes=random.randint(0, 600)); eid = "EV-" + uuid.uuid4().hex[:6].upper()
-        status = "Resolved" if i % 3 else "Dismissed"
-        c.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (eid, ts.isoformat(timespec="seconds"), "HIST", st_, ph, et, sev, 0.85, "{}", "historical seed", status,
-                   "", "Verified and cleared" if status == "Resolved" else "False positive", "Historical event.", "[]", gse))
-        c.execute("INSERT INTO history(event_id,ts,status,actor,note) VALUES(?,?,?,?,?)", (eid, ts.isoformat(timespec="seconds"), "Detected", "system", ""))
-        c.execute("INSERT INTO history(event_id,ts,status,actor,note) VALUES(?,?,?,?,?)",
-                  (eid, (ts + dt.timedelta(minutes=random.randint(3, 15))).isoformat(timespec="seconds"), "Acknowledged", "seed", ""))
+def create_event(ctx, f, evidence, summary, uncertainty, model):
+    cut = (dt.datetime.utcnow() - dt.timedelta(minutes=T["suppress_minutes"])).isoformat(timespec="seconds")
+    d = df("SELECT event_id FROM events WHERE gate=? AND rule_id=? AND status!='Suppressed' AND ts>=?", (ctx["gate"], f["rule"]["id"], cut))
+    dup = d.event_id[0] if len(d) else ""
+    eid, r = "EV-" + uuid.uuid4().hex[:6].upper(), f["rule"]
+    row = dict(event_id=eid, ts=now(), gate=ctx["gate"], camera=ctx["camera"], phase=ctx["phase"], phase_conf=ctx["phase_conf"],
+               event_type=f"{r['id']} {r['name']}", rule_id=r["id"], severity=f["severity"], confidence=f["confidence"], evidence=json.dumps(evidence),
+               status="Suppressed" if dup else "Presented", summary=summary, uncertainty=uncertainty,
+               checks=json.dumps(CFG["recommendations"][r["id"]]), notes="", resolution="", model_version=model, rule_version=CFG["rule_version"], duplicate_of=dup)
+    run(f"INSERT INTO events({','.join(COLS)}) VALUES({','.join('?' * len(COLS))})", [row[c] for c in COLS])
+    log(eid, "Detected", "system", f["reason"]); log(eid, "Validated", "system", "guardrails passed")
+    log(eid, row["status"], "system", f"duplicate of {dup} within {T['suppress_minutes']} min" if dup else "")
+    return eid, row["status"], dup
 
-def create_event(ctx, f, evidence, summary, checks):
-    eid = "EV-" + uuid.uuid4().hex[:6].upper(); t = now()
-    run("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (eid, t, ctx["aircraft_id"], ctx["stand_id"], ctx["phase"], f["event_type"], f["severity"], f["confidence"],
-         json.dumps(evidence), f["rule"], "Detected", "", "", summary, json.dumps(checks), ctx.get("gse", "")))
-    run("INSERT INTO history(event_id,ts,status,actor,note) VALUES(?,?,?,?,?)", (eid, t, "Detected", "RampGuard", f["rule"]))
-    return eid
-
-def transition(eid, new, actor, note="", resolution=""):
-    cur = df("SELECT status,severity FROM events WHERE event_id=?", (eid,)).iloc[0]
-    if new not in NEXT[cur.status]: raise ValueError(f"{cur.status} -> {new} not allowed")
-    if new == "Resolved" and not resolution.strip(): raise ValueError("Resolution is required (BR-006)")
-    if new == "Dismissed" and cur.severity in ("High", "Critical") and not note.strip():
-        raise ValueError("High/Critical events need a dismissal note (BR-005)")
-    run("UPDATE events SET status=?, resolution=CASE WHEN ?!='' THEN ? ELSE resolution END WHERE event_id=?", (new, resolution, resolution or new, eid))
-    if note: run("UPDATE events SET notes=COALESCE(notes,'')||? WHERE event_id=?", (f"[{now()} {actor}] {note}\n", eid))
-    run("INSERT INTO history(event_id,ts,status,actor,note) VALUES(?,?,?,?,?)", (eid, now(), new, actor, note))
+def transition(eid, new, actor, note="", reason=""):
+    cur = df("SELECT status FROM events WHERE event_id=?", (eid,)).status[0]
+    if new not in NEXT[cur]: raise ValueError(f"{cur} -> {new} not allowed")
+    if new == "Dismissed" and not reason: raise ValueError("Select a dismissal reason")
+    if new == "Resolved" and not note.strip(): raise ValueError("Add a note describing how it was resolved")
+    run("UPDATE events SET status=?, resolution=CASE WHEN ?!='' THEN ? ELSE resolution END, notes=notes||? WHERE event_id=?",
+        (new, reason, reason, f"[{now()} {actor}] {note}\n" if note else "", eid))
+    log(eid, new, actor, (reason + " " + note).strip())
