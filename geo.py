@@ -30,3 +30,25 @@ def annotate(img, objects, zones, highlight=()):
         d.rectangle([x0 * W / 1000, y0 * H / 1000, x1 * W / 1000, y1 * H / 1000], outline=(255, 0, 0, 255) if hot else (0, 220, 120, 255), width=5 if hot else 2)
         d.text((x0 * W / 1000 + 4, y0 * H / 1000 + 4), f"{o['label']} {o['confidence']:.0%}", fill=(255, 255, 255, 255))
     b = io.BytesIO(); Image.alpha_composite(im, ov).convert("RGB").save(b, "PNG"); return b.getvalue()
+
+def derive_zones(objects, spec):
+    """Zones from the detected (largest) aircraft box: clearance = wide band under/around it, restricted = lower part right at the fuselage."""
+    ac = [o for o in objects if o["type"] == "aircraft" and o.get("box")]
+    if not ac: return {}
+    y0, x0, y1, x1 = max(ac, key=lambda o: (o["box"][2] - o["box"][0]) * (o["box"][3] - o["box"][1]))["box"]
+    w, h, z = x1 - x0, y1 - y0, {}
+    for n, s in spec.items():
+        L, R, T, B = max(0, x0 - s["x_margin"] * w), min(1000, x1 + s["x_margin"] * w), y0 + s["top_frac"] * h, min(1000, y1 + s["bottom_margin"] * h)
+        z[n] = [[L, T], [R, T], [R, B], [L, B]]
+    return z
+
+def duration(path):
+    import cv2
+    cap = cv2.VideoCapture(path); fps, n = cap.get(cv2.CAP_PROP_FPS), cap.get(cv2.CAP_PROP_FRAME_COUNT); cap.release()
+    return n / fps if fps and n else 0
+
+def frame_at(path, t):
+    import cv2
+    cap = cv2.VideoCapture(path); cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000); ok, fr = cap.read(); cap.release()
+    if not ok: return None
+    return cv2.imencode(".png", fr)[1].tobytes()
