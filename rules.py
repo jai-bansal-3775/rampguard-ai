@@ -1,41 +1,53 @@
-"""Deterministic safety rules (BR-003/004). Gemini observes; rules decide."""
-SEV = ["Low", "Medium", "High", "Critical"]
-PHASES = ["Aircraft Arrival", "Baggage Handling", "Catering", "Fueling", "Boarding",
-          "Turnaround Completion", "Pushback Preparation"]
+"""Deterministic guardrails. Rules, zones, thresholds and phases come from config.json; geometry decides zone membership."""
+import json, os
+import geo
+CFG = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")))
+T = CFG["thresholds"]
 
-def _shift(s, n):
-    return SEV[max(0, min(3, SEV.index(s) + n))]
+def shift(s, n):
+    S = CFG["severities"]; return S[max(0, min(len(S) - 1, S.index(s) + n))]
 
-def evaluate(obs, ctx):
-    """obs: validated observation dict. ctx: {phase, clearance_m, ...}. Returns list of findings."""
-    out, clr, ph = [], float(ctx["clearance_m"]), ctx["phase"]
-    for o in obs.get("objects", []):
-        c, t, d = o["confidence"], o["type"], o.get("distance_m")
-        if c < 0.5:
-            continue  # too uncertain to raise an event
+def routine(o, phase):  # expected equipment doing its job is normal ramp activity
+    return o["type"] == "gse" and o.get("kind") in CFG["expected_gse"].get(phase, []) and o.get("activity") in ("servicing", "stationary")
 
-        def add(code, name, sev, rule, why):
-            if c < 0.65:
-                sev = _shift(sev, -1)  # low confidence lowers review priority
-            out.append(dict(event_type=f"{code} {name}", severity=sev, confidence=c,
-                            rule=rule, object=o, reason=why))
+def in_zone(o, zones, name):
+    return bool(o.get("box")) and geo.inside(geo.footprint(o["box"]), zones.get(name) or [])
 
-        zone = o.get("in_restricted_zone", False)
-        if t == "gse" and d is not None and d < clr:
-            sev = "Critical" if (ph == "Fueling" or d < clr / 2) else "High"
-            add("SE-002", "Unsafe GSE proximity", sev,
-                f"GSE distance {d} m < configured clearance {clr} m during {ph}",
-                f"{o['label']} appears {d} m from the aircraft, inside the {clr} m clearance, while phase is {ph}.")
-        if t == "person" and zone:
-            if ph == "Fueling":
-                add("SE-001", "Safety-zone intrusion", "Critical", f"Person in restricted zone during {ph}",
-                    f"{o['label']} appears inside the restricted zone during fueling.")
-            else:
-                add("SE-004", "Restricted-area personnel", "High" if ph == "Boarding" else "Medium",
-                    f"Person in restricted zone during {ph}",
-                    f"{o['label']} appears in a restricted area while phase is {ph}.")
-        if t == "obstruction" and ph in ("Turnaround Completion", "Pushback Preparation"):
-            add("SE-003", "Obstruction", "High" if ph == "Pushback Preparation" else "Medium",
-                f"Obstruction present during {ph}",
-                f"{o['label']} appears to block an operational path during {ph}.")
+def near(a, b, dist):  # footprint distance in 0-1000 image units
+    if not (a.get("box") and b.get("box")): return False
+    (x1, y1), (x2, y2) = geo.footprint(a["box"]), geo.footprint(b["box"]); return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5 < dist
+
+def candidates(obs, phase, zones):
+    out = []
+    for o in obs["objects"]:
+        if o["confidence"] < T["min_confidence"]: continue
+        for r in CFG["rules"]:
+            if r["object"] != o["type"] or not (r["phases"] == "*" or phase in r["phases"]): continue
+            if r.get("zone") and not in_zone(o, zones, r["zone"]): continue
+            if r["condition"] == "near_moving_vehicle" and not any(near(o, g, r["distance"]) for g in obs["objects"] if g["type"] == "gse" and g.get("activity") == "moving"): continue
+            if not routine(o, phase): out.append((r, o))
+    return out
+
+def evaluate(frames, phase, zones):
+    """zones: one dict for all frames, or a list with one dict per frame (video)."""
+    zl = zones if isinstance(zones, list) else [zones] * len(frames)
+    hits = {}
+    for i, obs in enumerate(frames):
+        for r, o in candidates(obs, phase, zl[i]):
+            hits.setdefault(r["id"], {"r": r, "fr": {}})["fr"].setdefault(i, []).append(o)
+    out = []
+    for h in hits.values():
+        r, fr = h["r"], h["fr"]; n = len(fr)
+        f = max(fr, key=lambda i: max(x["confidence"] for x in fr[i])); objs = fr[f]; o = max(objs, key=lambda x: x["confidence"]); c = o["confidence"]
+        sev = r["severity"].get(phase, r["severity"]["default"]); extra = ""
+        if r.get("escalate_zone") and in_zone(o, zl[f], r["escalate_zone"]): sev, extra = shift(sev, 1), f"; also inside {r['escalate_zone']} zone (escalated)"
+        if c < T["low_confidence"]: sev = shift(sev, -1)
+        single = len(frames) == 1
+        if single and CFG["severities"].index(sev) > CFG["severities"].index(T["single_frame_max_severity"]):
+            sev, extra = T["single_frame_max_severity"], extra + "; capped (single frame, confirm with 2+ frames)"
+        ok = n >= T["persistence_frames"] if not single else c >= T["single_frame_min_confidence"]
+        why = "" if ok else (f"seen in {n}/{len(frames)} frames (needs {T['persistence_frames']})" if not single else f"single-frame confidence {c:.0%} below {T['single_frame_min_confidence']:.0%}")
+        zn = f" inside {r['zone']} zone" if r.get("zone") else ""
+        out.append(dict(rule=r, object=o, objects=objs, severity=sev, confidence=c, eligible=ok, held_reason=why, frame=f,
+                        reason=f"{r['name']}: {len(objs)} object(s) ({o['label']}){zn} during {phase}; seen in {n}/{len(frames)} frame(s){extra}"))
     return out
