@@ -22,7 +22,8 @@ def log(eid, status, actor, note=""):
 
 def create_event(ctx, f, evidence, summary, uncertainty, model):
     cut = (dt.datetime.utcnow() - dt.timedelta(minutes=T["suppress_minutes"])).isoformat(timespec="seconds")
-    d = df("SELECT event_id FROM events WHERE gate=? AND rule_id=? AND status!='Suppressed' AND ts>=?", (ctx["gate"], f["rule"]["id"], cut))
+    lab = json.dumps(f["object"]["label"])[1:-1]
+    d = df("SELECT event_id FROM events WHERE gate=? AND rule_id=? AND status!='Suppressed' AND ts>=? AND evidence LIKE ?", (ctx["gate"], f["rule"]["id"], cut, f'%"label": "{lab}"%'))
     dup = d.event_id[0] if len(d) else ""
     eid, r = "EV-" + uuid.uuid4().hex[:6].upper(), f["rule"]
     row = dict(event_id=eid, ts=now(), gate=ctx["gate"], camera=ctx["camera"], phase=ctx["phase"], phase_conf=ctx["phase_conf"],

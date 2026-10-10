@@ -1,200 +1,261 @@
 {
- "rule_version": "rules-1.2",
+ "rule_version": "rules-1.3",
  "default_model": "gemini-3.5-flash-lite",
- "gate": {
-  "id": "C22",
-  "camera": "CAM-C22-01",
-  "clearance_m": 3.0,
-  "zone_definition": "area within the configured clearance of the fuselage, engines and fuel points"
- },
- "thresholds": {
-  "min_confidence": 0.6,
-  "low_confidence": 0.75,
-  "phase_confidence": 0.6,
-  "single_frame_min_confidence": 0.8,
-  "persistence_frames": 2,
-  "suppress_minutes": 10,
-  "single_frame_max_severity": "High",
-  "verify": true
- },
- "severities": [
-  "Low",
-  "Medium",
-  "High",
-  "Critical"
- ],
- "phases": [
-  "Aircraft Arrival",
-  "Baggage Handling",
-  "Catering",
-  "Fueling",
-  "Boarding",
-  "Turnaround Completion",
-  "Pushback Preparation"
- ],
- "object_types": [
-  "gse",
-  "person",
-  "aircraft",
-  "obstruction"
- ],
- "gse_kinds": [
-  "baggage",
-  "catering",
-  "fuel",
-  "stairs",
-  "bridge",
-  "tug",
-  "lavatory",
-  "ground_power",
-  "other"
- ],
- "expected_gse": {
-  "Aircraft Arrival": [
-   "tug",
-   "ground_power"
-  ],
-  "Baggage Handling": [
-   "baggage",
-   "ground_power"
-  ],
-  "Catering": [
-   "catering",
-   "ground_power"
-  ],
-  "Fueling": [
-   "fuel",
-   "ground_power"
-  ],
-  "Boarding": [
-   "stairs",
-   "bridge",
-   "ground_power"
-  ],
-  "Turnaround Completion": [
-   "ground_power"
-  ],
-  "Pushback Preparation": [
-   "tug"
-  ]
- },
- "rules": [
-  {
-   "id": "SE-001",
-   "name": "Safety-zone intrusion",
-   "object": "person",
-   "condition": "in_zone",
-   "phases": [
-    "Fueling"
-   ],
-   "severity": {
-    "default": "Critical"
-   },
-   "zone": "restricted"
+  "gate": {
+    "id": "C22",
+    "camera": "CAM-C22-01",
+    "clearance_m": 3,
+    "zone_definition": "area within the configured clearance of the fuselage, engines and fuel points"
   },
-  {
-   "id": "SE-002",
-   "name": "Unsafe GSE proximity",
-   "object": "gse",
-   "condition": "in_zone",
-   "phases": "*",
-   "severity": {
-    "default": "High",
-    "Fueling": "Critical"
-   },
-   "zone": "clearance",
-   "escalate_zone": "restricted"
+  "thresholds": {
+    "min_confidence": 0.6,
+    "low_confidence": 0.75,
+    "phase_confidence": 0.6,
+    "single_frame_min_confidence": 0.8,
+    "persistence_frames": 2,
+    "suppress_minutes": 10,
+    "single_frame_max_severity": "High",
+    "verify": true
   },
-  {
-   "id": "SE-003",
-   "name": "Obstruction (FOD candidate)",
-   "object": "obstruction",
-   "condition": "present",
-   "phases": [
-    "Turnaround Completion",
-    "Pushback Preparation"
-   ],
-   "severity": {
-    "default": "Medium",
-    "Pushback Preparation": "High"
-   }
-  },
-  {
-   "id": "SE-004",
-   "name": "Restricted-area personnel",
-   "object": "person",
-   "condition": "in_zone",
-   "phases": [
+  "severities": [
+    "Low",
+    "Medium",
+    "High",
+    "Critical"
+  ],
+  "phases": [
     "Aircraft Arrival",
+    "Baggage Handling",
+    "Catering",
+    "Fueling",
     "Boarding",
     "Turnaround Completion",
     "Pushback Preparation"
-   ],
-   "severity": {
-    "default": "Medium",
-    "Boarding": "High"
-   },
-   "zone": "restricted"
-  }
- ],
- "recommendations": {
-  "SE-001": [
-   "Visually verify whether anyone is inside the fueling safety zone.",
-   "Confirm fueling status with the fuel team lead.",
-   "Follow local fueling safety procedure."
   ],
-  "SE-002": [
-   "Verify the equipment position against the required clearance.",
-   "Confirm whether the equipment is moving or parked.",
-   "Contact the equipment operator if needed."
+  "object_types": [
+    "gse",
+    "person",
+    "aircraft",
+    "obstruction",
+    "hazard"
   ],
-  "SE-003": [
-   "Verify the object is real and whether it is in a critical path.",
-   "Confirm with the team lead whether it should be removed.",
-   "Record the outcome."
+  "gse_kinds": [
+    "baggage",
+    "catering",
+    "fuel",
+    "stairs",
+    "bridge",
+    "tug",
+    "lavatory",
+    "ground_power",
+    "other"
   ],
-  "SE-004": [
-   "Verify whether the person is authorized for this area in this phase.",
-   "Confirm the person's task with the team lead.",
-   "Reassess before the next operation step."
-  ]
- },
- "dismiss_reasons": [
-  "False positive - routine activity",
-  "False positive - misidentified object",
-  "Not actionable",
-  "Other"
- ],
- "lifecycle": {
-  "Presented": [
-   "Acknowledged",
-   "Escalated",
-   "Dismissed"
+  "expected_gse": {
+    "Aircraft Arrival": [
+      "tug",
+      "ground_power"
+    ],
+    "Baggage Handling": [
+      "baggage",
+      "ground_power"
+    ],
+    "Catering": [
+      "catering",
+      "ground_power"
+    ],
+    "Fueling": [
+      "fuel",
+      "ground_power"
+    ],
+    "Boarding": [
+      "stairs",
+      "bridge",
+      "ground_power"
+    ],
+    "Turnaround Completion": [
+      "ground_power"
+    ],
+    "Pushback Preparation": [
+      "tug"
+    ]
+  },
+  "rules": [
+    {
+      "id": "SE-001",
+      "name": "Safety-zone intrusion",
+      "object": "person",
+      "condition": "in_zone",
+      "phases": [
+        "Fueling"
+      ],
+      "severity": {
+        "default": "Critical"
+      },
+      "zone": "restricted"
+    },
+    {
+      "id": "SE-002",
+      "name": "Unsafe GSE proximity",
+      "object": "gse",
+      "condition": "in_zone",
+      "phases": "*",
+      "severity": {
+        "default": "High",
+        "Fueling": "Critical"
+      },
+      "zone": "clearance",
+      "escalate_zone": "restricted"
+    },
+    {
+      "id": "SE-003",
+      "name": "Obstruction (FOD candidate)",
+      "object": "obstruction",
+      "condition": "present",
+      "phases": [
+        "Aircraft Arrival",
+        "Baggage Handling",
+        "Catering",
+        "Boarding",
+        "Turnaround Completion",
+        "Pushback Preparation"
+      ],
+      "severity": {
+        "default": "Medium",
+        "Pushback Preparation": "High"
+      }
+    },
+    {
+      "id": "SE-004",
+      "name": "Restricted-area personnel",
+      "object": "person",
+      "condition": "in_zone",
+      "phases": [
+        "Aircraft Arrival",
+        "Baggage Handling",
+        "Catering",
+        "Boarding",
+        "Turnaround Completion",
+        "Pushback Preparation"
+      ],
+      "severity": {
+        "default": "Medium",
+        "Boarding": "High",
+        "Baggage Handling": "Low",
+        "Catering": "Low"
+      },
+      "zone": "restricted"
+    },
+    {
+      "id": "SE-006",
+      "name": "Other hazard observed",
+      "object": "hazard",
+      "condition": "present",
+      "phases": "*",
+      "severity": {
+        "default": "Medium"
+      }
+    },
+    {
+      "id": "SE-005",
+      "name": "Moving vehicle near personnel",
+      "object": "person",
+      "condition": "near_moving_vehicle",
+      "distance": 70,
+      "phases": "*",
+      "severity": {
+        "default": "Medium",
+        "Pushback Preparation": "High",
+        "Aircraft Arrival": "High"
+      }
+    }
   ],
-  "Acknowledged": [
-   "Resolved",
-   "Escalated"
+  "recommendations": {
+    "SE-001": [
+      "Visually verify whether anyone is inside the fueling safety zone.",
+      "Confirm fueling status with the fuel team lead.",
+      "Follow local fueling safety procedure."
+    ],
+    "SE-002": [
+      "Verify the equipment position against the required clearance.",
+      "Confirm whether the equipment is moving or parked.",
+      "Contact the equipment operator if needed."
+    ],
+    "SE-003": [
+      "Verify the object is real and whether it is in a critical path.",
+      "Confirm with the team lead whether it should be removed.",
+      "Record the outcome."
+    ],
+    "SE-004": [
+      "Verify whether the person is authorized for this area in this phase.",
+      "Confirm the person's task with the team lead.",
+      "Reassess before the next operation step."
+    ],
+    "SE-005": [
+      "Verify whether the vehicle is moving and the driver can see the person.",
+      "Confirm the person's position relative to the vehicle path.",
+      "Ask the team lead to hold movement if needed."
+    ],
+    "SE-006": [
+      "Verify the condition is real and where it is relative to aircraft and walkways.",
+      "Ask the team lead to make the area safe or mark it.",
+      "Record the outcome."
+    ]
+  },
+  "dismiss_reasons": [
+    "False positive - routine activity",
+    "False positive - misidentified object",
+    "Not actionable",
+    "Other"
   ],
-  "Escalated": [
-   "Resolved"
-  ],
-  "Dismissed": [
-   "Closed"
-  ],
-  "Resolved": [
-   "Closed"
-  ],
-  "Closed": [],
-  "Suppressed": []
- },
- "zones": {
-  "names": [
-   "clearance",
-   "restricted"
-  ],
-  "descriptions": {
-   "clearance": "ground area around the aircraft where equipment and people should not be unless servicing the aircraft",
-   "restricted": "inner no-go ground area close to engines, fuel points and landing gear"
-  }
- }
+  "lifecycle": {
+    "Presented": [
+      "Acknowledged",
+      "Escalated",
+      "Dismissed"
+    ],
+    "Acknowledged": [
+      "Resolved",
+      "Escalated"
+    ],
+    "Escalated": [
+      "Resolved"
+    ],
+    "Dismissed": [
+      "Closed"
+    ],
+    "Resolved": [
+      "Closed"
+    ],
+    "Closed": [],
+    "Suppressed": []
+  },
+  "zones": {
+    "names": [
+      "clearance",
+      "restricted"
+    ],
+    "descriptions": {
+      "clearance": "ground area around the aircraft where equipment and people should not be unless servicing the aircraft",
+      "restricted": "inner no-go ground area close to engines, fuel points and landing gear"
+    }
+  },
+  "video": {
+    "max_mb": 18,
+    "max_moments": 12,
+    "fps": 1
+  },
+  "derived_zones": {
+    "clearance": {
+      "x_margin": 0.1,
+      "top_frac": 0.35,
+      "bottom_margin": 0.45
+    },
+    "restricted": {
+      "x_margin": 0,
+      "top_frac": 0.65,
+      "bottom_margin": 0.25
+    }
+  },
+  "obstruction_examples": "fallen or displaced traffic cones, hoses or cables lying across the ground, loose objects or debris",
+ "hazard_guidance": "any other visible unsafe or abnormal condition that the fixed types do not cover, for example a fluid spill or leak, smoke, a damaged or tilted vehicle or equipment, an unattended running vehicle, an open hatch or door in a vehicle path, a person on equipment that is not meant to carry people, a person without high-visibility clothing"
 }
