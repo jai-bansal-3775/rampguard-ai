@@ -66,7 +66,7 @@ with t_an:
                             key = (f["rule"]["id"], f["object"]["label"])
                             if key in S.live_seen: continue  # one event per hazard per live session
                             S.live_seen.add(key)
-                            img = geo.annotate(png, objs, zones, [o["label"] for o in f["objects"]])
+                            img = geo.annotate(png, objs, zones, [f["object"]["label"]])
                             path = f"data/evidence/{uuid.uuid4().hex[:8]}.png"; open(path, "wb").write(img)
                             ctx = dict(gate=CFG["gate"]["id"], camera=CFG["gate"]["camera"] + " (LIVE)", phase=phase, phase_conf=d["phase_confidence"])
                             summ, unc = ai.explain(ctx, f)
@@ -90,55 +90,71 @@ with t_an:
     phase_ov = st.selectbox("Phase", CFG["phases"]) if mode.startswith("Manual") else None
     up = st.file_uploader("Ramp image(s). Upload 2+ consecutive frames to confirm persistence.", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
     if up: st.image([u.getvalue() for u in up], width=220)
-    if st.button("Analyze", type="primary", disabled=not up):
+    vid = st.file_uploader("Video clip (optional — overrides images above)", type=["mp4", "mov", "avi"], key="vid")
+    if vid: st.video(vid)
+    if st.button("Analyze", type="primary", disabled=not (up or vid)):
         frames = [(u.getvalue(), u.type) for u in up]
         try:
-            with st.spinner("Gemini analyzing…"):
+            with st.spinner("Analyzing… (video may take 20–40 s)"):
                 vpath = None
                 if vid:
                     if len(vid.getvalue()) > CFG["video"]["max_mb"] * 1e6: raise ai.AIError(f"Video larger than {CFG['video']['max_mb']} MB: trim or compress it.")
-                    os.makedirs("data/video", exist_ok=True); vpath = f"data/video/{uuid.uuid4().hex[:8]}_{vid.name}"; open(vpath, "wb").write(vid.getvalue())
+                    os.makedirs("data/video", exist_ok=True); safe_name = os.path.basename(vid.name); vpath = f"data/video/{uuid.uuid4().hex[:8]}_{safe_name}"; open(vpath, "wb").write(vid.getvalue())
                     dur = geo.duration(vpath)
                     if not dur: raise ai.AIError("Could not read the video file (try MP4 / H.264).")
                     a = ai.analyze_clip(vpath, dur); imgs = [geo.frame_at(vpath, t) for t in a["times"]]
                 else:
-                    fr = [(u.getvalue(), u.type) for u in imgs_up]; a = ai.analyze(fr); imgs = [b for b, _ in fr]; a["times"] = [None] * len(imgs)
-            ok = [i for i, im in enumerate(imgs) if im]
-            if not ok: raise ai.AIError("No usable frames were extracted.")
-            a["frames"], a["times"], imgs = [a["frames"][i] for i in ok], [a["times"][i] for i in ok], [imgs[i] for i in ok]
-            ph, pc = (phase_ov, 1.0) if phase_ov else (a["phase"], a["phase_confidence"])
-            res = {"analysis": a, "phase": ph, "pc": pc, "items": []}
-            if ph == "Unknown" or pc < T["phase_confidence"]:
-                res["note"] = "Phase could not be determined confidently. Phase-specific rules were not applied (safety first); choose Manual override if you know the phase."
-                ph = "Unknown"
-            zones = geo.load_zones() if zsrc.startswith("Saved") else a["zones"]
-            if not any(len(p) >= 3 for p in zones.values()): res["zone_note"] = "No safety zone available: zone-based rules could not be evaluated. Use Zone setup or a clearer image."
-            p0 = f"data/evidence/{uuid.uuid4().hex[:8]}_all.png"; open(p0, "wb").write(geo.annotate(frames[0][0], a["frames"][0]["objects"], zones)); res["preview"] = p0
-            ctx = dict(gate=CFG["gate"]["id"], camera=CFG["gate"]["camera"], phase=ph, phase_conf=pc)
-            for f in rules.evaluate(a["frames"], ph, zones):
-                if not f["eligible"]: res["items"].append(("held", f["rule"]["name"], f["held_reason"])); continue
-                fi = f["frame"]; img = geo.annotate(frames[fi][0], a["frames"][fi]["objects"], zones, [f["object"]["label"]])
-                v = {"supported": True, "confidence": None, "reason": "Verifier disabled in config"}
-                if T["verify"]:
-                    try: v = ai.verify(img, f, ph)
-                    except ai.AIError as e: v = {"supported": True, "confidence": None, "reason": f"Verifier unavailable ({e}); alert kept for safety"}
-                summ = unc = None
-                if v["supported"]:
-                    try: summ, unc = ai.explain(ctx, f)
-                    except (ai.AIError, KeyError, TypeError): summ, unc = f["reason"], "AI explanation unavailable (degraded mode)."
-                return f, reason, img, v, summ, unc
+                    fr = [(u.getvalue(), u.type) for u in up]; a = ai.analyze(fr); imgs = [b for b, _ in fr]; a["times"] = [None] * len(imgs)
+                ok = [i for i, im in enumerate(imgs) if im]
+                if not ok: raise ai.AIError("No usable frames were extracted.")
+                a["frames"], a["times"], imgs = [a["frames"][i] for i in ok], [a["times"][i] for i in ok], [imgs[i] for i in ok]
+                ph, pc = (phase_ov, 1.0) if phase_ov else (a["phase"], a["phase_confidence"])
+                res = {"analysis": a, "phase": ph, "pc": pc, "items": []}
+                if ph == "Unknown" or pc < T["phase_confidence"]:
+                    res["note"] = "Phase could not be determined confidently. Phase-specific rules were not applied (safety first); choose Manual override if you know the phase."
+                    ph = "Unknown"
+                # Zone selection: Gemini proposal → derive from aircraft → saved fixed-camera zones
+                zones = geo.load_zones() if zsrc.startswith("Saved") else a["zones"]
+                if not any(len(p) >= 3 for p in zones.values()):
+                    all_objs = [o for _fr in a["frames"] for o in _fr["objects"]]
+                    zones = geo.derive_zones(all_objs, CFG["derived_zones"])
+                if not any(len(p) >= 3 for p in zones.values()):
+                    zones = geo.load_zones()
+                if not any(len(p) >= 3 for p in zones.values()):
+                    res["zone_note"] = "No safety zone available: zone-based rules could not be evaluated. Use Zone setup or a clearer image."
+                moments = []
+                for _i, (_img, _t) in enumerate(zip(imgs, a["times"])):
+                    _mp = f"data/evidence/{uuid.uuid4().hex[:8]}_m{_i}.png"
+                    open(_mp, "wb").write(geo.annotate(_img, a["frames"][_i]["objects"], zones))
+                    moments.append((_t, _mp, f"{len(a['frames'][_i]['objects'])} detection(s)"))
+                res["moments"] = moments
+                ctx = dict(gate=CFG["gate"]["id"], camera=CFG["gate"]["camera"], phase=ph, phase_conf=pc)
+                all_findings = rules.evaluate(a["frames"], ph, zones)
+                for f in all_findings:
+                    if not f["eligible"]: res["items"].append(("held", f["rule"]["name"], f["held_reason"]))
+                eligible = [f for f in all_findings if f["eligible"]]
 
-            from concurrent.futures import ThreadPoolExecutor
-            with ThreadPoolExecutor(6) as _ex:
-                assessed = list(_ex.map(_assess, eligible))
-            for f, reason, img, v, summ, unc in assessed:
-                f["reason"] = reason
-                if not v["supported"]: res["items"].append(("held", f["rule"]["name"], "verifier rejected: " + v["reason"])); continue
-                path = f"data/evidence/{uuid.uuid4().hex[:8]}.png"; open(path, "wb").write(img)
-                summ, unc = ai.explain(ctx, f)
-                eid, stt, dup = db.create_event(ctx, f, {"image": path, "object": f["object"], "scene": a["scene_summary"], "phase_evidence": a["phase_evidence"], "verifier": v}, summ, unc, ai.MODEL)
-                res["items"].append((stt, eid, f"{f['rule']['id']} {f['severity']}" + (f" · duplicate of {dup}" if dup else "")))
-            S.last = res
+                def _assess(f):
+                    fi = f["frame"]; img = geo.annotate(imgs[fi], a["frames"][fi]["objects"], zones, [f["object"]["label"]])
+                    v = {"supported": True, "confidence": None, "reason": "Verifier disabled in config"}
+                    if T["verify"]:
+                        try: v = ai.verify(img, f, ph)
+                        except ai.AIError as e: v = {"supported": True, "confidence": None, "reason": f"Verifier unavailable ({e}); alert kept for safety"}
+                    summ = unc = None
+                    if v["supported"]:
+                        try: summ, unc = ai.explain(ctx, f)
+                        except (ai.AIError, KeyError, TypeError): summ, unc = f["reason"], "AI explanation unavailable (degraded mode)."
+                    return f, img, v, summ, unc
+
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(6) as _ex:
+                    assessed = list(_ex.map(_assess, eligible))
+                for f, img, v, summ, unc in assessed:
+                    if not v["supported"]: res["items"].append(("held", f["rule"]["name"], "verifier rejected: " + v["reason"])); continue
+                    path = f"data/evidence/{uuid.uuid4().hex[:8]}.png"; open(path, "wb").write(img)
+                    eid, stt, dup = db.create_event(ctx, f, {"image": path, "object": f["object"], "scene": a["scene_summary"], "phase_evidence": a["phase_evidence"], "verifier": v}, summ, unc, ai.MODEL)
+                    res["items"].append((stt, eid, f"{f['rule']['id']} {f['severity']}" + (f" · duplicate of {dup}" if dup else "")))
+                S.last = res
         except ai.AIError as e:
             S.last = {"error": str(e)}
         st.rerun()  # reload so the console shows the new events immediately
@@ -158,6 +174,64 @@ with t_an:
             (st.error if k == "Presented" else st.warning if k in ("Suppressed", "held") else st.info)(f"{'Alert' if k=='Presented' else k}: {n} · {d}")
         if not L["items"]: st.success("No rule triggered. Routine activity for this phase was not flagged.")
         with st.expander("Raw observations"): st.json(a["frames"])
+
+with t_replay:
+    st.write("Compare how the same scene scores under two different turnaround phases.")
+    if not S.get("last") or "error" in S.get("last", {}):
+        st.info("Analyse an image or video first (Analyze evidence tab), then come back here.")
+    else:
+        L = S["last"]; a = L["analysis"]
+        c1, c2 = st.columns(2)
+        pa = c1.selectbox("Phase A", CFG["phases"], key="rpa")
+        pb = c2.selectbox("Phase B", CFG["phases"], index=min(1, len(CFG["phases"]) - 1), key="rpb")
+        if st.button("Compare phases", type="primary", key="replay_go"):
+            zones = a["zones"] if any(len(p) >= 3 for p in a["zones"].values()) else geo.load_zones()
+            fa = [f for f in rules.evaluate(a["frames"], pa, zones) if f["eligible"]]
+            fb = [f for f in rules.evaluate(a["frames"], pb, zones) if f["eligible"]]
+            try: narrative = ai.phase_contrast(a["scene_summary"], pa, fa, pb, fb)
+            except ai.AIError as e: narrative = f"AI unavailable: {e}"
+            S["replay"] = {"pa": pa, "pb": pb, "fa": fa, "fb": fb, "narrative": narrative}
+        if S.get("replay"):
+            r = S["replay"]
+            st.info(r["narrative"])
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader(r["pa"])
+                for f in r["fa"]: st.error(f"{f['rule']['id']} {f['rule']['name']} · {f['severity']} · {f['object']['label']}")
+                if not r["fa"]: st.success("No rules triggered.")
+            with c2:
+                st.subheader(r["pb"])
+                for f in r["fb"]: st.error(f"{f['rule']['id']} {f['rule']['name']} · {f['severity']} · {f['object']['label']}")
+                if not r["fb"]: st.success("No rules triggered.")
+
+with t_agents:
+    st.write("Run the Google ADK multi-agent pipeline and inspect each agent's reasoning step.")
+    if not S.get("last") or "error" in S.get("last", {}):
+        st.info("Analyse an image or video first (Analyze evidence tab), then come back here.")
+    else:
+        L = S["last"]; a = L["analysis"]
+        if st.button("Run agent pipeline", type="primary", key="agents_go"):
+            zones = a["zones"] if any(len(p) >= 3 for p in a["zones"].values()) else geo.load_zones()
+            try:
+                import agents as ag
+                with st.spinner("Running ADK pipeline…"):
+                    trace, confirmed, briefing = ag.run_pipeline(a["frames"], L["phase"], L["pc"], zones, a["scene_summary"])
+                S["agent_trace"] = {"trace": trace, "confirmed": confirmed, "briefing": briefing}
+            except Exception as e:
+                S["agent_trace"] = {"error": str(e)}
+        if S.get("agent_trace"):
+            at = S["agent_trace"]
+            if "error" in at:
+                st.error(f"Pipeline error: {at['error']}")
+            else:
+                if at["briefing"]: st.success(f"**Briefing:** {at['briefing']}")
+                for step in at["trace"]:
+                    with st.expander(f"🤖 {step['agent']}"):
+                        st.write(step["text"])
+                if at["confirmed"]:
+                    st.subheader("Confirmed findings")
+                    for f in at["confirmed"]:
+                        st.warning(f"{f['rule']['id']} {f['rule']['name']} · {f['severity']} · {f['object']['label']}")
 
 with t_zone:
     st.caption("Zones belong to a fixed camera. Coordinates are 0-1000 (x right, y down). Let Gemini suggest, then adjust the points and save.")

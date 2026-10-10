@@ -196,5 +196,16 @@
    "clearance": "ground area around the aircraft where equipment and people should not be unless servicing the aircraft",
    "restricted": "inner no-go ground area close to engines, fuel points and landing gear"
   }
- }
+ },
+ "video": {
+  "max_mb": 20,
+  "fps": 1.0,
+  "max_moments": 12
+ },
+ "derived_zones": {
+  "clearance": {"x_margin": 0.6, "top_frac": 0.55, "bottom_margin": 0.4},
+  "restricted": {"x_margin": 0.2, "top_frac": 0.72, "bottom_margin": 0.28}
+ },
+ "obstruction_examples": "traffic cones out of place or fallen, baggage carts blocking a path, tools or debris on the ground, hoses or cables lying across the ramp",
+ "hazard_guidance": "any fluid spill, fuel leak, smoke, fire, ice patch, or other clearly unsafe condition visible on the ramp surface"
 }

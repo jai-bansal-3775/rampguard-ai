@@ -23,6 +23,11 @@ def candidates(obs, phase, zones):
             if not routine(o, phase): out.append((r, o))
     return out
 
+def near(a, b, dist):
+    if not a.get("box") or not b.get("box"): return False
+    fa, fb = geo.footprint(a["box"]), geo.footprint(b["box"])
+    return ((fa[0] - fb[0]) ** 2 + (fa[1] - fb[1]) ** 2) ** 0.5 < dist
+
 def track(items, dist=150):
     """Group one rule's (frame, object) hits into per-object tracks by footprint proximity; each track is one finding."""
     tracks = []  # each: {frame: [objects]}, last object
