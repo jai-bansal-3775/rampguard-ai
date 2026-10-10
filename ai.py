@@ -203,6 +203,24 @@ def explain(ctx, f):
     except (AIError, KeyError, TypeError):
         return f["reason"], "AI explanation unavailable (degraded mode); rule-based reason shown."
 
+def turnaround_brief(gate, phase, scene_summary, findings_text):
+    """Proactive operational intelligence brief: synthesises current findings into a supervisor-ready insight."""
+    try:
+        j = _gen(
+            f"You are a ramp operations intelligence assistant providing decision support only. "
+            f"Gate: {gate}. Current turnaround phase: {phase}. "
+            f"Scene observation: {scene_summary}. "
+            f"Current safety findings: {findings_text}. "
+            'Return JSON {"brief": "2-3 sentences: what was observed in this production phase, '
+            'the operational risk level right now, and one specific pre-emptive check a supervisor '
+            'should perform before the next phase begins. Decision support only — no commands, '
+            'no compliance claims, no identity inferences.", '
+            '"risk_level": "one of: Normal / Elevated / High / Critical"}'
+        )
+        return str(j.get("brief", "")), str(j.get("risk_level", "Normal"))
+    except (AIError, KeyError, TypeError):
+        return "", "Normal"
+
 def phase_contrast(scene, pa, fa, pb, fb):
     """One short narrative on why the same scene carries different risk under two phases."""
     def summ(fs): return "; ".join(f"{f['rule']['id']} {f['rule']['name']} ({f['severity']}) on {f['object']['label']}" for f in fs) or "no alerts"
@@ -215,3 +233,18 @@ def copilot(event, question, similar):
     keep = ("event_id", "gate", "phase", "event_type", "severity", "confidence", "status", "summary", "uncertainty", "notes")
     return _gen(f"You are RampGuard Safety Copilot, decision support only; the human supervisor decides. Event: {json.dumps({k: event[k] for k in keep}, default=str)}. "
                 f"Similar past events: {similar}. Use only this evidence, be concise, phrase advice as checks for a human, never as commands or clearances. Question: {question}", as_json=False)
+
+def pattern_recommendation(gate, rule_id, phase, count):
+    """GenAI corrective recommendation for a recurring safety pattern."""
+    try:
+        j = _gen(
+            f"You are a ramp operations safety advisor. Gate {gate} has triggered rule {rule_id} "
+            f"{count} times during the '{phase}' turnaround phase. This is a recurring pattern, not a one-off event. "
+            'Return JSON {"recommendation": "2-3 sentences: a specific corrective measure the operations manager '
+            'should implement to reduce recurrence. Frame as a process or procedural change (pre-phase briefing, '
+            'physical barrier, checklist item). Decision support only — no commands, no compliance claims.", '
+            '"priority": "one of: Low / Medium / High"}'
+        )
+        return str(j.get("recommendation", "")), str(j.get("priority", "Medium"))
+    except (AIError, KeyError, TypeError):
+        return "", "Medium"
