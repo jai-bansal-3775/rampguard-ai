@@ -1,6 +1,7 @@
 """Gemini service. No fabricated output: failures raise AIError and the UI shows a degraded state."""
-import os, json
+import os, json, threading, queue, asyncio
 from rules import CFG
+
 def _load_env():
     """Read GEMINI_API_KEY etc. from a local .env file (git-ignored). Real environment variables take priority."""
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -13,6 +14,9 @@ def _load_env():
 _load_env()
 MODEL = os.environ.get("GEMINI_MODEL", CFG["default_model"])
 PERCEPTION_MODEL = os.environ.get("GEMINI_PERCEPTION_MODEL", MODEL)
+LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", CFG.get("live_model", "gemini-2.0-flash-live-001"))
+USE_VERTEX = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true", "yes")
+
 class AIError(Exception): pass
 _C = None
 
@@ -20,8 +24,19 @@ def _client():
     global _C
     if _C is None:
         from google import genai
-        _C = genai.Client(api_key=os.environ["GEMINI_API_KEY"]) if os.environ.get("GEMINI_API_KEY") else genai.Client()
+        if USE_VERTEX:
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+            _C = genai.Client(vertexai=True, project=project, location=location)
+        elif os.environ.get("GEMINI_API_KEY"):
+            _C = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        else:
+            _C = genai.Client()
     return _C
+
+def vertex_mode() -> bool:
+    """True when the app is running against Vertex AI (vs AI Studio API key)."""
+    return USE_VERTEX
 
 def _norm(raw):
     """Gemini sometimes wraps its JSON in a list or returns the list of moments directly."""
@@ -248,3 +263,132 @@ def pattern_recommendation(gate, rule_id, phase, count):
         return str(j.get("recommendation", "")), str(j.get("priority", "Medium"))
     except (AIError, KeyError, TypeError):
         return "", "Medium"
+
+
+# ---------------------------------------------------------------------------
+# Gemini 2.0 Live Stream — persistent WebSocket session for real-time analysis
+# ---------------------------------------------------------------------------
+
+_live_stop: threading.Event = None
+_live_thread: threading.Thread = None
+_frame_q: queue.Queue = queue.Queue(maxsize=1)   # only latest frame matters
+_result_q: queue.Queue = queue.Queue(maxsize=20)
+
+_LIVE_SYSTEM = (
+    "You are a ramp-safety vision assistant monitoring a live airport ramp camera. "
+    "For EACH frame I send reply with ONLY a valid JSON object — no markdown fences, no explanation: "
+    '{"phase": "<one of the turnaround phases or Unknown>", "phase_confidence": <0-1>, '
+    '"objects": [{"type": "<gse|person|aircraft|obstruction>", "kind": "<baggage|catering|fuel|stairs|bridge|tug|lavatory|ground_power|other or null>", '
+    '"label": "<str>", "activity": "<servicing|moving|stationary|unknown>", '
+    '"box_2d": [ymin, xmin, ymax, xmax], "confidence": <0-1>}]}. '
+    "All box coordinates are integers 0-1000 (x right, y down), tight around the visible object. "
+    "Observe only; never identify people or infer intent."
+)
+
+
+def _live_worker(stop: threading.Event):
+    asyncio.run(_live_async(stop))
+
+
+async def _live_async(stop: threading.Event):
+    from google.genai import types
+    cfg = {
+        "response_modalities": ["TEXT"],
+        "system_instruction": _LIVE_SYSTEM,
+    }
+    try:
+        async with _client().aio.live.connect(model=LIVE_MODEL, config=cfg) as session:
+            while not stop.is_set():
+                try:
+                    frame_bytes = _frame_q.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                try:
+                    await session.send_client_content(
+                        turns=types.Content(role="user", parts=[
+                            types.Part.from_bytes(data=frame_bytes, mime_type="image/jpeg"),
+                            types.Part(text=(
+                                f"Analyze this live ramp camera frame. "
+                                f"Valid phases: {CFG['phases']}. "
+                                f"Valid object types: {CFG['object_types']}. "
+                                f"Valid gse kinds: {CFG['gse_kinds']}."
+                            )),
+                        ]),
+                        turn_complete=True,
+                    )
+                    parts = []
+                    async for msg in session.receive():
+                        if msg.server_content and msg.server_content.model_turn:
+                            for p in msg.server_content.model_turn.parts:
+                                if p.text:
+                                    parts.append(p.text)
+                        if msg.server_content and msg.server_content.turn_complete:
+                            break
+                    _result_q.put({"ok": True, "text": "".join(parts).strip()})
+                except Exception as e:
+                    _result_q.put({"ok": False, "error": str(e)[:300]})
+    except Exception as e:
+        _result_q.put({"ok": False, "error": f"Live session failed to connect: {e}"})
+
+
+def start_live_session():
+    """Open a Gemini 2.0 Live WebSocket session in a background thread. Safe to call multiple times."""
+    global _live_stop, _live_thread
+    if _live_thread and _live_thread.is_alive():
+        return
+    _live_stop = threading.Event()
+    _live_thread = threading.Thread(target=_live_worker, args=(_live_stop,), daemon=True)
+    _live_thread.start()
+
+
+def stop_live_session():
+    """Close the live session and drain both queues."""
+    global _live_stop, _live_thread
+    if _live_stop:
+        _live_stop.set()
+    _live_thread = None
+    _live_stop = None
+    for q in (_frame_q, _result_q):
+        while not q.empty():
+            try: q.get_nowait()
+            except Exception: break
+
+
+def send_live_frame(frame_bytes: bytes):
+    """Push one JPEG frame into the live session. Drops silently if the previous frame hasn't been consumed yet."""
+    try:
+        _frame_q.put_nowait(frame_bytes)
+    except queue.Full:
+        pass
+
+
+def get_live_result(timeout: float = 2.5):
+    """Block up to `timeout` seconds for the next live result dict. Returns None on timeout."""
+    try:
+        return _result_q.get(timeout=timeout)
+    except queue.Empty:
+        return None
+
+
+def parse_live_result(result: dict):
+    """Convert a live session result dict into the same structure as detect_frame(). Raises AIError on failure."""
+    if not result or not result.get("ok"):
+        raise AIError(result.get("error", "Live session error") if result else "No result from live session")
+    text = result["text"]
+    # strip markdown fences if the model added them despite instructions
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else parts[0]
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        d = json.loads(text.strip())
+    except json.JSONDecodeError as e:
+        raise AIError(f"Live result JSON parse error: {e} — raw: {text[:120]}")
+    z = CFG["zones"]
+    return {
+        "phase": d.get("phase") if d.get("phase") in CFG["phases"] else "Unknown",
+        "phase_confidence": _num(d.get("phase_confidence")) or 0.0,
+        "objects": _objs(d.get("objects", [])),
+        "zones": {n: [] for n in z["names"]},
+    }

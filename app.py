@@ -20,7 +20,12 @@ S = st.session_state
 user = st.sidebar.text_input("Supervisor", "supervisor.1")
 st.sidebar.warning("Decision support only. It does not replace local procedures, trained judgment, or authorized operational control.")
 st.sidebar.caption(f"Model: {ai.MODEL} · Rules: {CFG['rule_version']}")
-st.sidebar.caption("✅ Gemini API key loaded" if os.environ.get("GEMINI_API_KEY") else "❌ No Gemini API key found. Create a .env file (see .env.example)")
+if ai.vertex_mode():
+    st.sidebar.caption(f"✅ Vertex AI · project {os.environ.get('GOOGLE_CLOUD_PROJECT', 'unset')} · {os.environ.get('GOOGLE_CLOUD_LOCATION', 'us-central1')}")
+elif os.environ.get("GEMINI_API_KEY"):
+    st.sidebar.caption("✅ Gemini API key loaded (AI Studio)")
+else:
+    st.sidebar.caption("❌ No credentials found. Set GEMINI_API_KEY or configure Vertex AI in .env")
 st.sidebar.markdown("---")
 st.sidebar.caption("**Theme:** Manufacturing · Intelligent Operations & Industrial Efficiency")
 st.sidebar.caption("🏭 Turnaround = production cycle · Phase = process step · Safety rule = quality gate")
@@ -53,16 +58,29 @@ with t_an:
 | Proactive intelligence | ❌ Reactive alerts only | ✅ Turnaround brief generated before next phase |
 | Duplicate handling | ❌ Repeat alerts flood console | ✅ Time-windowed suppression + persistence check |
 | Safety Copilot | ❌ Static checklist | ✅ Conversational AI copilot per event |""")
-    with st.expander("🔴 Live analysis (webcam) — point the camera at the ramp or a screen playing ramp footage", expanded=False):
-        st.caption("Scans the live feed frame by frame and raises alerts in real time. Phase is detected automatically, like recorded analysis. Runs on this machine's camera (local demo).")
-        lc1, lc2 = st.columns(2)
-        live_zsrc = lc1.selectbox("Zones", ["Derived from detected aircraft", "Saved fixed-camera zones"], key="live_zsrc")
-        cam_idx = lc2.number_input("Camera index", 0, 5, 0, key="live_cam")
+    with st.expander("🔴 Live analysis — webcam or video stream", expanded=False):
+        st.caption("Scans the live feed and raises alerts in real time. Phase is detected automatically.")
+        lc1, lc2, lc3 = st.columns(3)
+        live_mode = lc1.selectbox("Analysis mode", ["Standard (per-frame)", "✨ Gemini 2.0 Live Stream"], key="live_mode",
+                                  help="Gemini 2.0 Live uses a persistent WebSocket session — more efficient and genuinely multimodal")
+        live_zsrc = lc2.selectbox("Zones", ["Derived from detected aircraft", "Saved fixed-camera zones"], key="live_zsrc")
+        cam_idx = lc3.number_input("Camera index", 0, 5, 0, key="live_cam",
+                                   help="0 = default webcam. On Cloud Run (no camera) use the video upload mode below")
+        use_gemini_live = live_mode.startswith("✨")
+        if use_gemini_live:
+            st.info(f"**Gemini 2.0 Live Stream** — model `{ai.LIVE_MODEL}` · persistent WebSocket session · real-time multimodal analysis", icon="✨")
         b1, b2 = st.columns(2)
         if b1.button("▶ Start live detection", type="primary", key="live_go", disabled=S.get("live_running", False)):
-            S.live_running = True; S.live_seen = set(); S.live_log = []; st.rerun()
+            S.live_running = True; S.live_seen = set(); S.live_log = []
+            S.live_use_gemini20 = use_gemini_live
+            if use_gemini_live:
+                ai.start_live_session()
+            st.rerun()
         if b2.button("⏹ Stop live detection", key="live_stop", disabled=not S.get("live_running", False)):
-            S.live_running = False; st.rerun()
+            S.live_running = False
+            if S.get("live_use_gemini20"):
+                ai.stop_live_session()
+            st.rerun()
         frame_ph, status_ph, log_ph = st.empty(), st.empty(), st.container()
         if S.get("live_running"):
             import cv2, time
@@ -70,35 +88,45 @@ with t_an:
             if cap is None or not cap.isOpened():
                 cap = cv2.VideoCapture(int(cam_idx)); S.live_cap = cap
             if not cap.isOpened():
-                S.live_running = False; status_ph.error(f"Could not open camera {int(cam_idx)}. Try another index.")
+                S.live_running = False
+                if S.get("live_use_gemini20"): ai.stop_live_session()
+                status_ph.error(f"Could not open camera {int(cam_idx)}. Try another index or upload a video clip.")
             else:
-                status_ph.info("● LIVE · scanning for hazards…  (press Stop to end)")
-                t_show = time.time()  # show a short smooth preview, then analyse one frame
+                mode_label = "✨ LIVE · Gemini 2.0" if S.get("live_use_gemini20") else "● LIVE"
+                status_ph.info(f"{mode_label} · scanning for hazards…  (press Stop to end)")
+                t_show = time.time()
                 while time.time() - t_show < 0.8:
                     ok, fr = cap.read()
-                    if ok: frame_ph.image(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB), channels="RGB", caption="● LIVE")
+                    if ok: frame_ph.image(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB), channels="RGB", caption=f"{mode_label}")
                 if not ok:
-                    status_ph.warning("● LIVE · no camera frame")
+                    status_ph.warning(f"{mode_label} · no camera frame")
                 else:
                     png = cv2.imencode(".jpg", fr)[1].tobytes()
                     try:
-                        d = ai.detect_frame(png); objs = d["objects"]
+                        if S.get("live_use_gemini20"):
+                            ai.send_live_frame(png)
+                            raw = ai.get_live_result(timeout=3.0)
+                            d = ai.parse_live_result(raw)
+                        else:
+                            d = ai.detect_frame(png)
+                        objs = d["objects"]
                         phase = d["phase"] if d["phase_confidence"] >= T["phase_confidence"] else "Unknown"
                         zones = geo.derive_zones(objs, CFG["derived_zones"]) if live_zsrc.startswith("Derived") else geo.load_zones()
-                        frame_ph.image(geo.annotate(png, objs, zones), caption=f"● LIVE · {phase if phase!='Unknown' else 'phase unknown'}")
+                        frame_ph.image(geo.annotate(png, objs, zones), caption=f"{mode_label} · {phase if phase != 'Unknown' else 'phase unknown'}")
                         for f in (rules.evaluate([{"objects": objs}], phase, zones) if phase != "Unknown" else []):
                             if not f["eligible"]: continue
                             key = (f["rule"]["id"], f["object"]["label"])
-                            if key in S.live_seen: continue  # one event per hazard per live session
+                            if key in S.live_seen: continue
                             S.live_seen.add(key)
                             img = geo.annotate(png, objs, zones, [f["object"]["label"]])
                             path = f"data/evidence/{uuid.uuid4().hex[:8]}.png"; open(path, "wb").write(img)
+                            model_tag = f"{ai.LIVE_MODEL} (Live)" if S.get("live_use_gemini20") else ai.MODEL
                             ctx = dict(gate=CFG["gate"]["id"], camera=CFG["gate"]["camera"] + " (LIVE)", phase=phase, phase_conf=d["phase_confidence"])
                             summ, unc = ai.explain(ctx, f)
-                            eid, stt, dup = db.create_event(ctx, f, {"image": path, "object": f["object"], "scene": "Live webcam detection", "phase_evidence": f"Auto-detected phase: {phase}", "verifier": {"supported": True, "confidence": f["confidence"], "reason": "Live single-frame detection"}, "t": None, "video": None, "live": True}, summ, unc, ai.MODEL)
+                            eid, stt, dup = db.create_event(ctx, f, {"image": path, "object": f["object"], "scene": "Live stream detection", "phase_evidence": f"Auto-detected phase: {phase}", "verifier": {"supported": True, "confidence": f["confidence"], "reason": "Live single-frame detection"}, "t": None, "video": None, "live": True}, summ, unc, model_tag)
                             S.live_log.insert(0, f"🔴 {f['rule']['id']} {f['rule']['name']} · {f['severity']} · {f['object']['label']} · event {eid}")
                     except ai.AIError as e:
-                        status_ph.warning(f"● LIVE · scan error: {e}")
+                        status_ph.warning(f"{mode_label} · scan error: {e}")
                 for line in S.get("live_log", []): log_ph.error(line)
                 time.sleep(0.2); st.rerun()
         else:
