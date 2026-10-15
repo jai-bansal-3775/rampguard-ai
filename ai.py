@@ -13,9 +13,9 @@ def _load_env():
                 if not os.environ.get(k.strip()): os.environ[k.strip()] = v.strip().strip("\"'")
 _load_env()
 MODEL = os.environ.get("GEMINI_MODEL", CFG["default_model"])
+REASONING_MODEL = os.environ.get("GEMINI_REASONING_MODEL", CFG.get("reasoning_model", MODEL))
 PERCEPTION_MODEL = os.environ.get("GEMINI_PERCEPTION_MODEL", MODEL)
-LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", CFG.get("live_model", "gemini-2.0-flash-live-001"))
-USE_VERTEX = os.environ.get("GOOGLE_GENAI_USE_VERTEXAI", "").lower() in ("1", "true", "yes")
+LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", CFG.get("live_model", MODEL))
 
 class AIError(Exception): pass
 _C = None
@@ -24,19 +24,19 @@ def _client():
     global _C
     if _C is None:
         from google import genai
-        if USE_VERTEX:
-            project = os.environ.get("GOOGLE_CLOUD_PROJECT")
-            location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
-            _C = genai.Client(vertexai=True, project=project, location=location)
-        elif os.environ.get("GEMINI_API_KEY"):
-            _C = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-        else:
-            _C = genai.Client()
+        from google.genai import types as _t
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        if not project:
+            raise AIError("GOOGLE_CLOUD_PROJECT is not set. Add it to your .env file.")
+        _C = genai.Client(
+            vertexai=True, project=project, location=location,
+            http_options=_t.HttpOptions(timeout=300000),  # 300 seconds in ms
+        )
     return _C
 
 def vertex_mode() -> bool:
-    """True when the app is running against Vertex AI (vs AI Studio API key)."""
-    return USE_VERTEX
+    return True
 
 def _norm(raw):
     """Gemini sometimes wraps its JSON in a list or returns the list of moments directly."""
@@ -53,11 +53,22 @@ def _t(v, dur):
     except (TypeError, ValueError):
         return None
 
-def _gen(contents, as_json=True, model=None):
+def _gen(contents, as_json=True, model=None, stream=False, thinking_budget=0):
     from google.genai import types
     try:
-        r = _client().models.generate_content(model=model or MODEL, contents=contents, config=types.GenerateContentConfig(
-            response_mime_type="application/json" if as_json else None, temperature=0.1))
+        cfg = types.GenerateContentConfig(
+            response_mime_type="application/json" if as_json else None,
+            temperature=0.1,
+            thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget))
+        if stream:
+            chunks = []
+            for chunk in _client().models.generate_content_stream(
+                    model=model or MODEL, contents=contents, config=cfg):
+                if chunk.text:
+                    chunks.append(chunk.text)
+            text = "".join(chunks)
+            return _norm(json.loads(text)) if as_json else text
+        r = _client().models.generate_content(model=model or MODEL, contents=contents, config=cfg)
         return _norm(json.loads(r.text)) if as_json else r.text
     except Exception as e:
         raise AIError(str(e)[:200])
@@ -161,7 +172,7 @@ def analyze_clip(path, duration):
     for t in (duration * (i + 0.5) / n for i in range(n)):
         png = geo.frame_at(path, t)
         if png:
-            b = io.BytesIO(); Image.open(io.BytesIO(png)).convert("RGB").save(b, "JPEG", quality=85); fr.append((b.getvalue(), "image/jpeg")); ts.append(t)
+            b = io.BytesIO(); Image.open(io.BytesIO(png)).convert("RGB").save(b, "JPEG", quality=60); fr.append((b.getvalue(), "image/jpeg")); ts.append(t)
     if len(fr) < 2: raise AIError("Could not read frames from the video.")
     a = analyze(fr, ts); a["times"] = ts
     from concurrent.futures import ThreadPoolExecutor
@@ -200,20 +211,50 @@ def analyze_video(data, mime, duration):
     except (KeyError, TypeError, ValueError) as e:
         raise AIError(f"Invalid model output: {e}")
 
+def analyze_video_gcs(gcs_uri: str, mime: str, duration: float):
+    """Analyze video via GCS URI — Vertex AI fetches the file internally, no upload from client needed."""
+    from google.genai import types
+    g, v = CFG["gate"], CFG["video"]
+    prompt = (f"You are a ramp-safety vision assistant analysing a {duration:.0f}-second clip from camera {g['camera']} at one aircraft stand. "
+              "Observe only: never judge safety, identify people or infer intent. Return JSON: "
+              f'{{"phase": one of {CFG["phases"]} or "Unknown", "phase_confidence": 0-1, "phase_evidence": "visible cues for the phase", "scene_summary": str, '
+              f'"moments": [{{"t": seconds from clip start, "objects": [{{"type": one of {CFG["object_types"]}, "kind": one of {CFG["gse_kinds"]} or null, "label": str, '
+              f'"activity": "servicing|moving|stationary|unknown", "box_2d": [ymin,xmin,ymax,xmax], "confidence": 0-1}}]}}]}}. '
+              f"Give up to {v['max_moments']} moments spread over the whole clip (about one per second, denser where something changes). "
+              f"Report as type obstruction any {CFG['obstruction_examples']}, each with its box. "
+              f"Report as type hazard, with a specific descriptive label, {CFG['hazard_guidance']}. "
+              "Mark activity moving only for equipment that is visibly in motion. "
+              "Every moment must include the aircraft itself as type aircraft with its box. "
+              "Coordinates are integers 0-1000 (x right, y down) for the frame at time t. Use Unknown/null when unsure.")
+    raw = _gen([types.Part.from_uri(file_uri=gcs_uri, mime_type=mime), prompt], stream=True)
+    try:
+        ms = sorted(((_t(m.get("t"), duration), m) for m in raw["moments"] if isinstance(m, dict)), key=lambda x: x[0] if x[0] is not None else -1)
+        ms = [(t, m) for t, m in ms if t is not None][:v["max_moments"]]
+        ph = raw.get("phase") if raw.get("phase") in CFG["phases"] else "Unknown"
+        return {"phase": ph, "phase_confidence": _num(raw.get("phase_confidence")) or 0.0,
+                "phase_evidence": str(raw.get("phase_evidence", ""))[:300],
+                "scene_summary": str(raw.get("scene_summary", ""))[:400],
+                "zones": {}, "times": [t for t, _ in ms],
+                "frames": [{"objects": _objs(m.get("objects", []))} for _, m in ms]}
+    except (KeyError, TypeError, ValueError) as e:
+        raise AIError(f"Invalid model output: {e}")
+
 def verify(img, f, phase):
     """Second, skeptical pass: does the annotated evidence really support the proposed alert?"""
     from google.genai import types
     j = _gen([types.Part.from_bytes(data=img, mime_type="image/png"),
               f"You are a skeptical ramp-safety reviewer. The red box marks the object behind a proposed alert; shaded areas are configured zones. "
               f"Phase: {phase}. Proposed alert: {f['reason']}. Judge only whether the image clearly shows the described condition (right object, right position relative to the shaded zones); whether the activity is routine is decided elsewhere. "
-              'Return JSON {"supported": true only if the image clearly shows the condition, "confidence": 0-1, "reason": one sentence}. Do not identify people or infer intent.'])
+              'Return JSON {"supported": true only if the image clearly shows the condition, "confidence": 0-1, "reason": one sentence}. Do not identify people or infer intent.'],
+             model=REASONING_MODEL, thinking_budget=1024)
     return {"supported": j.get("supported") is True or str(j.get("supported")).lower() == "true", "confidence": _num(j.get("confidence")), "reason": str(j.get("reason", ""))[:250]}
 
 def explain(ctx, f):
     try:
         j = _gen(f"Ground-safety decision support. Context: {json.dumps(ctx)}. Finding: {f['reason']} (severity {f['severity']}, confidence {f['confidence']:.0%}). "
                  'Return JSON {"summary": 2 sentences grounded only in this finding, "uncertainty": 1 sentence on what is uncertain or missing}. '
-                 "Do not give commands, clearances or compliance statements.")
+                 "Do not give commands, clearances or compliance statements.",
+                 model=REASONING_MODEL, thinking_budget=1024)
         return str(j["summary"]), str(j["uncertainty"])
     except (AIError, KeyError, TypeError):
         return f["reason"], "AI explanation unavailable (degraded mode); rule-based reason shown."
@@ -230,7 +271,8 @@ def turnaround_brief(gate, phase, scene_summary, findings_text):
             'the operational risk level right now, and one specific pre-emptive check a supervisor '
             'should perform before the next phase begins. Decision support only — no commands, '
             'no compliance claims, no identity inferences.", '
-            '"risk_level": "one of: Normal / Elevated / High / Critical"}'
+            '"risk_level": "one of: Normal / Elevated / High / Critical"}',
+            model=REASONING_MODEL, thinking_budget=1024
         )
         return str(j.get("brief", "")), str(j.get("risk_level", "Normal"))
     except (AIError, KeyError, TypeError):
@@ -241,13 +283,15 @@ def phase_contrast(scene, pa, fa, pb, fb):
     def summ(fs): return "; ".join(f"{f['rule']['id']} {f['rule']['name']} ({f['severity']}) on {f['object']['label']}" for f in fs) or "no alerts"
     j = _gen(f"Ground-safety decision support. The SAME camera scene is assessed under two turnaround phases. Scene: {scene}. "
              f"Under {pa}: {summ(fa)}. Under {pb}: {summ(fb)}. "
-             'Return JSON {"narrative": "2-3 sentences, plain language, explaining why the identical scene carries different risk in each phase (for example, fueling makes people and equipment near the aircraft far more dangerous). Decision support only; no commands or clearances."}.')
+             'Return JSON {"narrative": "2-3 sentences, plain language, explaining why the identical scene carries different risk in each phase (for example, fueling makes people and equipment near the aircraft far more dangerous). Decision support only; no commands or clearances."}.',
+             model=REASONING_MODEL, thinking_budget=1024)
     return str(j.get("narrative", ""))[:500]
 
 def copilot(event, question, similar):
     keep = ("event_id", "gate", "phase", "event_type", "severity", "confidence", "status", "summary", "uncertainty", "notes")
     return _gen(f"You are RampGuard Safety Copilot, decision support only; the human supervisor decides. Event: {json.dumps({k: event[k] for k in keep}, default=str)}. "
-                f"Similar past events: {similar}. Use only this evidence, be concise, phrase advice as checks for a human, never as commands or clearances. Question: {question}", as_json=False)
+                f"Similar past events: {similar}. Use only this evidence, be concise, phrase advice as checks for a human, never as commands or clearances. Question: {question}",
+                as_json=False, model=REASONING_MODEL, thinking_budget=1024)
 
 def pattern_recommendation(gate, rule_id, phase, count):
     """GenAI corrective recommendation for a recurring safety pattern."""
@@ -258,7 +302,8 @@ def pattern_recommendation(gate, rule_id, phase, count):
             'Return JSON {"recommendation": "2-3 sentences: a specific corrective measure the operations manager '
             'should implement to reduce recurrence. Frame as a process or procedural change (pre-phase briefing, '
             'physical barrier, checklist item). Decision support only — no commands, no compliance claims.", '
-            '"priority": "one of: Low / Medium / High"}'
+            '"priority": "one of: Low / Medium / High"}',
+            model=REASONING_MODEL, thinking_budget=1024
         )
         return str(j.get("recommendation", "")), str(j.get("priority", "Medium"))
     except (AIError, KeyError, TypeError):
@@ -287,17 +332,48 @@ _LIVE_SYSTEM = (
 
 
 def _live_worker(stop: threading.Event):
-    asyncio.run(_live_async(stop))
+    import sys
+    if sys.platform == "win32":
+        # Use SelectorEventLoop per-thread to avoid ProactorBasePipeTransport
+        # cleanup errors on Windows without affecting Streamlit's global policy.
+        loop = asyncio.SelectorEventLoop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_live_async(stop))
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+    else:
+        asyncio.run(_live_async(stop))
 
 
 async def _live_async(stop: threading.Event):
+    from google import genai as _genai
     from google.genai import types
-    cfg = {
-        "response_modalities": ["TEXT"],
-        "system_instruction": _LIVE_SYSTEM,
-    }
+    # Fresh client per session (avoids cross-event-loop issues on Windows).
+    # Vertex AI Live API requires explicit project allowlisting for
+    # gemini-2.0-flash-live-001. Use AI Studio key (GEMINI_API_KEY) when
+    # available — it supports the Live API out of the box.
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        live_c = _genai.Client(api_key=api_key)
+        live_model_to_use = "gemini-2.0-flash-live-001"
+    else:
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+        location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+        live_c = _genai.Client(vertexai=True, project=project, location=location)
+        live_model_to_use = LIVE_MODEL
     try:
-        async with _client().aio.live.connect(model=LIVE_MODEL, config=cfg) as session:
+        live_cfg = types.LiveConnectConfig(
+            response_modalities=["TEXT"],
+            system_instruction=_LIVE_SYSTEM,
+        )
+    except Exception:
+        live_cfg = {"response_modalities": ["TEXT"], "system_instruction": _LIVE_SYSTEM}
+    try:
+        async with live_c.aio.live.connect(model=live_model_to_use, config=live_cfg) as session:
             while not stop.is_set():
                 try:
                     frame_bytes = _frame_q.get(timeout=1.0)
@@ -308,7 +384,7 @@ async def _live_async(stop: threading.Event):
                         turns=types.Content(role="user", parts=[
                             types.Part.from_bytes(data=frame_bytes, mime_type="image/jpeg"),
                             types.Part(text=(
-                                f"Analyze this live ramp camera frame. "
+                                f"Analyze this ramp camera frame. "
                                 f"Valid phases: {CFG['phases']}. "
                                 f"Valid object types: {CFG['object_types']}. "
                                 f"Valid gse kinds: {CFG['gse_kinds']}."
@@ -318,17 +394,22 @@ async def _live_async(stop: threading.Event):
                     )
                     parts = []
                     async for msg in session.receive():
-                        if msg.server_content and msg.server_content.model_turn:
-                            for p in msg.server_content.model_turn.parts:
-                                if p.text:
-                                    parts.append(p.text)
-                        if msg.server_content and msg.server_content.turn_complete:
-                            break
-                    _result_q.put({"ok": True, "text": "".join(parts).strip()})
+                        sc = getattr(msg, "server_content", None)
+                        if sc:
+                            mt = getattr(sc, "model_turn", None)
+                            if mt:
+                                for p in (mt.parts or []):
+                                    if getattr(p, "text", None):
+                                        parts.append(p.text)
+                            if getattr(sc, "turn_complete", False):
+                                break
+                    text = "".join(parts).strip()
+                    _result_q.put({"ok": bool(text), "text": text,
+                                   "error": "Empty response" if not text else None})
                 except Exception as e:
                     _result_q.put({"ok": False, "error": str(e)[:300]})
     except Exception as e:
-        _result_q.put({"ok": False, "error": f"Live session failed to connect: {e}"})
+        _result_q.put({"ok": False, "error": f"Live session: {e}"})
 
 
 def start_live_session():

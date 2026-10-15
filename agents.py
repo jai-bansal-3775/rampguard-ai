@@ -1,16 +1,16 @@
 """Google ADK multi-agent orchestration for RampGuard.
 
-A SequentialAgent chains five specialist agents over one already-analysed clip:
-Perception -> Context -> Risk -> Skeptic -> Briefing. Each agent reuses the
-existing deterministic/Gemini code (ai.py, rules.py) and records a trace step,
-so the reasoning chain is visible without re-running perception.
+A SequentialAgent chains seven specialist agents over one already-analysed clip:
+Perception -> Context -> Risk -> Skeptic -> Grounding -> Trend -> Briefing.
+
+Each agent reuses the existing deterministic/Gemini code (ai.py, rules.py, db.py)
+and records a trace step, so the reasoning chain is visible without re-running perception.
 """
 import asyncio, uuid
 from typing import AsyncGenerator
 from google.adk.agents import BaseAgent, SequentialAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
-from google.adk.runners import InMemoryRunner
 from google.genai import types
 import ai, rules
 from rules import CFG, T
@@ -83,6 +83,80 @@ class SkepticAgent(_Stage):
         return msg
 
 
+class GroundingAgent(_Stage):
+    """Uses Vertex AI Google Search grounding to retrieve real IATA/ICAO safety guidance for the triggered rule."""
+    def step(self, bb):
+        confirmed = bb.get("confirmed", [])
+        if not confirmed:
+            bb["grounding"] = ""
+            return "No confirmed findings — grounding search skipped."
+        sev_rank = {s: i for i, s in enumerate(CFG["severities"])}
+        top = max(confirmed, key=lambda f: sev_rank[f["severity"]])
+        rule_name = top["rule"]["name"]
+        phase = bb["phase"]
+        query = (
+            f"IATA AHM 630 or ICAO Doc 9137 Part 8 safety requirements for '{rule_name}' "
+            f"during aircraft ground handling '{phase}' phase. "
+            f"What are the specific clearance distances, personnel restrictions, and procedural requirements?"
+        )
+        try:
+            from google.genai import types as _gt
+            cfg = _gt.GenerateContentConfig(
+                tools=[_gt.Tool(google_search_retrieval=_gt.GoogleSearchRetrieval())],
+                temperature=0.1,
+            )
+            r = ai._client().models.generate_content(
+                model=ai.MODEL,
+                contents=query,
+                config=cfg
+            )
+            text = (r.text or "").strip()
+            if text:
+                bb["grounding"] = text[:600]
+                return f"Search-grounded safety reference: {text[:400]}"
+        except Exception as e:
+            bb["grounding"] = ""
+            return f"Google Search grounding unavailable ({str(e)[:80]}); continuing without external reference."
+        bb["grounding"] = ""
+        return "Search returned no usable result; continuing without external reference."
+
+
+class TrendAgent(_Stage):
+    """Queries the event log for recurring patterns at this gate to detect systemic risk."""
+    def step(self, bb):
+        confirmed = bb.get("confirmed", [])
+        if not confirmed:
+            bb["trend"] = ""
+            return "No confirmed findings — trend analysis skipped."
+        import db, datetime as dt
+        gate = CFG["gate"]["id"]
+        cutoff = (dt.datetime.utcnow() - dt.timedelta(days=30)).isoformat(timespec="seconds")
+        try:
+            ev = db.df(
+                "SELECT rule_id, severity, status FROM events WHERE gate=? AND ts>=? AND status!='Suppressed'",
+                (gate, cutoff)
+            )
+            if ev.empty:
+                bb["trend"] = f"No historical events at gate {gate} in the past 30 days."
+                return bb["trend"]
+            counts = ev.rule_id.value_counts()
+            top_rule = counts.idxmax()
+            top_count = int(counts.max())
+            conf_rules = {f["rule"]["id"] for f in confirmed}
+            msg = f"Gate {gate} event log (30 days): {len(ev)} total events. Most triggered rule: {top_rule} ({top_count}×)."
+            if top_rule in conf_rules and top_count >= 3:
+                msg += f" ⚠️ This alert ({top_rule}) matches the top recurring pattern — systemic risk indicator, escalation recommended."
+            elif top_count >= 3:
+                msg += f" Current alert is not the top pattern, but watch for systemic trends."
+            else:
+                msg += " No recurring patterns detected yet."
+            bb["trend"] = msg
+            return msg
+        except Exception as e:
+            bb["trend"] = ""
+            return f"Trend analysis unavailable ({str(e)[:60]}); continuing without historical context."
+
+
 class BriefingAgent(_Stage):
     def step(self, bb):
         confirmed = bb.get("confirmed", [])
@@ -96,7 +170,10 @@ class BriefingAgent(_Stage):
         except Exception:
             summ = top["reason"]
         bb["briefing"] = summ
-        return f"Supervisor briefing — priority {top['severity']} ({top['rule']['id']}): {summ}"
+        result = f"Supervisor briefing — priority {top['severity']} ({top['rule']['id']}): {summ}"
+        if bb.get("trend") and "⚠️" in bb.get("trend", ""):
+            result += " [Systemic pattern detected — see Trend analysis above.]"
+        return result
 
 
 def build_pipeline(board_key):
@@ -105,6 +182,8 @@ def build_pipeline(board_key):
         ContextAgent(name="ContextAgent", board_key=board_key),
         RiskAgent(name="RiskAgent", board_key=board_key),
         SkepticAgent(name="SkepticAgent", board_key=board_key),
+        GroundingAgent(name="GroundingAgent", board_key=board_key),
+        TrendAgent(name="TrendAgent", board_key=board_key),
         BriefingAgent(name="BriefingAgent", board_key=board_key),
     ])
 
@@ -113,7 +192,8 @@ def run_pipeline(frames, phase, phase_conf, zones, scene=""):
     """Run the ADK sequential pipeline over one analysed clip. Returns (trace, confirmed_findings, briefing)."""
     key = uuid.uuid4().hex
     _BOARDS[key] = {"frames": frames, "phase": phase, "phase_conf": phase_conf, "zones": zones,
-                    "scene": scene, "trace": [], "candidates": [], "confirmed": [], "briefing": ""}
+                    "scene": scene, "trace": [], "candidates": [], "confirmed": [], "briefing": "",
+                    "grounding": "", "trend": ""}
     try:
         runner = InMemoryRunner(agent=build_pipeline(key), app_name=APP)
 

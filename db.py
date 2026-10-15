@@ -66,7 +66,9 @@ def efficiency_kpis():
                 cost_savings_usd=hc * 4200, reviewed=reviewed, false_positives=false_positives)
 
 def seed_demo():
-    """Insert sample demo events. Safe to call multiple times (INSERT OR IGNORE)."""
+    """Insert sample demo events. Clears existing demo events first so re-clicking is idempotent."""
+    run("DELETE FROM history WHERE event_id LIKE 'DM-%'")
+    run("DELETE FROM events WHERE event_id LIKE 'DM-%'")
     import random
     _demos = [
         ("SE-001","Safety-zone intrusion","Critical","Fueling","Ground crew member near fuel point"),
