@@ -609,15 +609,16 @@ with t_ops:
                     _pc = st.columns([3, 1])
                     _pc[0].warning(f"**{_x.rule_id}** triggered **{_x.count}×** during phase **{_x.phase}** at gate {_x.gate}")
                     _rk = f"rec_{_x.rule_id}_{_x.phase.replace(' ', '_')}"
+                    _rk_result = _rk + "_result"
                     if _pc[1].button("Get AI recommendation", key=_rk):
                         with st.spinner("Generating recommendation…"):
                             try:
                                 _rt, _rp = ai.pattern_recommendation(_x.gate, _x.rule_id, _x.phase, _x.count)
-                                S[_rk] = (_rt, _rp)
+                                S[_rk_result] = (_rt, _rp)
                             except ai.AIError:
-                                S[_rk] = ("AI recommendation unavailable in degraded mode.", "Medium")
-                    if S.get(_rk):
-                        _rt, _rp = S[_rk]
+                                S[_rk_result] = ("AI recommendation unavailable in degraded mode.", "Medium")
+                    if S.get(_rk_result):
+                        _rt, _rp = S[_rk_result]
                         {"High": st.error, "Medium": st.warning, "Low": st.info}.get(_rp, st.info)(f"**AI Recommendation (priority {_rp}):** {_rt}")
     st.divider()
     st.subheader("Scale Architecture: Prototype → Production")
