@@ -11,6 +11,7 @@ from typing import AsyncGenerator
 from google.adk.agents import BaseAgent, SequentialAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.events import Event
+from google.adk.runners import InMemoryRunner
 from google.genai import types
 import ai, rules
 from rules import CFG, T

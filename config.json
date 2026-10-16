@@ -205,8 +205,8 @@
   "max_moments": 5
  },
  "derived_zones": {
-  "clearance": {"x_margin": 0.6, "top_frac": 0.55, "bottom_margin": 0.4},
-  "restricted": {"x_margin": 0.2, "top_frac": 0.72, "bottom_margin": 0.28}
+  "clearance": {"x_margin": 0.7, "top_frac": 0.15, "bottom_margin": 0.5},
+  "restricted": {"x_margin": 0.25, "top_frac": 0.45, "bottom_margin": 0.35}
  },
  "obstruction_examples": "traffic cones out of place or fallen, baggage carts blocking a path, tools or debris on the ground, hoses or cables lying across the ramp",
  "hazard_guidance": "any fluid spill, fuel leak, smoke, fire, ice patch, or other clearly unsafe condition visible on the ramp surface"

@@ -4,11 +4,11 @@
 # Requires: gcloud CLI logged in, project set to rampguard-ai
 set -e
 
-PROJECT="rampguard-ai"
+PROJECT="rampguard-ai-511716"
 REGION="us-central1"
 SERVICE="rampguard-ai"
 REPO="rampguard"
-GCS_BUCKET="rampguard-ai-media"
+GCS_BUCKET="rampguard-ai-511716-media"
 IMAGE="$REGION-docker.pkg.dev/$PROJECT/$REPO/$SERVICE:latest"
 
 echo "=== Step 1: Enable required APIs ==="

@@ -278,16 +278,10 @@ with t_an:
                     dur = geo.duration(vpath)
                     if not dur: raise ai.AIError("Could not read the video file (try MP4 / H.264).")
                     if stor.enabled():
-                        _status.update(label="Step 1/5 — Uploading to Cloud Storage…")
-                        _gcs_uri = stor.upload_video(vpath)
-                        _status.update(label="Step 1/5 — Gemini Vision: analyzing video via Cloud Storage…")
-                        try:
-                            a = ai.analyze_video_gcs(_gcs_uri, "video/mp4", dur)
-                        except ai.AIError:
-                            _status.update(label="Step 1/5 — Cloud Storage path failed, falling back to frame analysis…")
-                            a = ai.analyze_clip(vpath, dur)
-                    else:
-                        a = ai.analyze_clip(vpath, dur)
+                        _status.update(label="Step 1/5 — Uploading video to Cloud Storage…")
+                        stor.upload_video(vpath)  # store in GCS for evidence archival
+                    _status.update(label="Step 1/5 — Gemini Vision: extracting frames and detecting objects…")
+                    a = ai.analyze_clip(vpath, dur)
                     imgs = [geo.frame_at(vpath, t) for t in a["times"]]
                 else:
                     fr = [(u.getvalue(), u.type) for u in up]; a = ai.analyze(fr); imgs = [b for b, _ in fr]; a["times"] = [None] * len(imgs)
@@ -305,6 +299,15 @@ with t_an:
                 if not any(len(p) >= 3 for p in zones.values()):
                     all_objs = [o for _fr in a["frames"] for o in _fr["objects"]]
                     zones = geo.derive_zones(all_objs, CFG["derived_zones"])
+                # Fill any individually-missing zones (Gemini may return clearance but not restricted)
+                _zone_names = CFG["zones"]["names"]
+                _missing = [n for n in _zone_names if len(zones.get(n, [])) < 3]
+                if _missing:
+                    _all_objs = [o for _fr in a["frames"] for o in _fr["objects"]]
+                    _derived = geo.derive_zones(_all_objs, CFG["derived_zones"])
+                    for _zn in _missing:
+                        if len(_derived.get(_zn, [])) >= 3:
+                            zones[_zn] = _derived[_zn]
                 if not any(len(p) >= 3 for p in zones.values()):
                     zones = geo.load_zones()
                 if not any(len(p) >= 3 for p in zones.values()):

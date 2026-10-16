@@ -65,6 +65,14 @@ def efficiency_kpis():
     return dict(avg_ack_min=avg_ack_min, precision_pct=precision_pct, high_critical=hc,
                 cost_savings_usd=hc * 4200, reviewed=reviewed, false_positives=false_positives)
 
+_DEMO_IMG_BASE = "https://storage.googleapis.com/rampguard-ai-511716-media/demo"
+_DEMO_IMGS = {
+    "SE-001": f"{_DEMO_IMG_BASE}/se001.jpg",
+    "SE-002": f"{_DEMO_IMG_BASE}/se002.jpg",
+    "SE-003": f"{_DEMO_IMG_BASE}/se003.jpg",
+    "SE-004": f"{_DEMO_IMG_BASE}/se004.jpg",
+}
+
 def seed_demo():
     """Insert sample demo events. Clears existing demo events first so re-clicking is idempotent."""
     run("DELETE FROM history WHERE event_id LIKE 'DM-%'")
@@ -84,9 +92,11 @@ def seed_demo():
     for rule_id, rule_name, severity, phase, obj_label in _demos:
         eid = "DM-" + uuid.uuid4().hex[:6].upper()
         _st = random.choice(_pick)
+        _img = _DEMO_IMGS.get(rule_id, "")
         row = dict(event_id=eid, ts=now(), gate=CFG["gate"]["id"], camera=CFG["gate"]["camera"],
                    phase=phase, phase_conf=0.9, event_type=f"{rule_id} {rule_name}",
-                   rule_id=rule_id, severity=severity, confidence=0.85, evidence=json.dumps({}),
+                   rule_id=rule_id, severity=severity, confidence=0.85,
+                   evidence=json.dumps({"image": _img} if _img else {}),
                    status=_st, summary=f"{rule_name}: {obj_label} during {phase}",
                    uncertainty="Demo scenario event", checks=json.dumps(CFG["recommendations"].get(rule_id, [])),
                    notes="[DEMO]", resolution="False positive - routine activity" if _st == "Dismissed" else "",

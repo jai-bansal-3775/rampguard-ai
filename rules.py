@@ -11,7 +11,16 @@ def routine(o, phase):  # expected equipment doing its job is normal ramp activi
     return o["type"] == "gse" and o.get("kind") in CFG["expected_gse"].get(phase, []) and o.get("activity") in ("servicing", "stationary")
 
 def in_zone(o, zones, name):
-    return bool(o.get("box")) and geo.inside(geo.footprint(o["box"]), zones.get(name) or [])
+    """True if any part of the object's bounding box is inside the named zone polygon."""
+    if not o.get("box"): return False
+    poly = zones.get(name) or []
+    if len(poly) < 3: return False
+    y0, x0, y1, x1 = o["box"]
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    # Check 9 representative points: 4 corners, 4 edge midpoints, centre
+    for pt in [(x0,y0),(x1,y0),(x1,y1),(x0,y1),(cx,y0),(cx,y1),(x0,cy),(x1,cy),(cx,cy)]:
+        if geo.inside(pt, poly): return True
+    return False
 
 def candidates(obs, phase, zones):
     out = []
@@ -20,7 +29,11 @@ def candidates(obs, phase, zones):
         for r in CFG["rules"]:
             if r["object"] != o["type"] or not (r["phases"] == "*" or phase in r["phases"]): continue
             if r.get("zone") and not in_zone(o, zones, r["zone"]): continue
-            if not routine(o, phase): out.append((r, o))
+            # Zone-based rules: presence inside the zone always warrants review.
+            # Operators dismiss expected routine equipment via the workflow.
+            # Non-zone rules (e.g. SE-003 obstruction): still apply routine filter.
+            if r.get("zone") or not routine(o, phase):
+                out.append((r, o))
     return out
 
 def near(a, b, dist):
@@ -41,7 +54,8 @@ def evaluate(frames, phase, zones):
     hits = {}
     for i, obs in enumerate(frames):
         for r, o in candidates(obs, phase, zones):
-            h = hits.setdefault((r["id"], o["label"]), {"r": r, "o": o, "n": 0, "f": i}); h["n"] += 1
+            # Key on rule+type+kind so same physical object tracked across frames even if label text varies
+            h = hits.setdefault((r["id"], o["type"], o.get("kind", "")), {"r": r, "o": o, "n": 0, "f": i}); h["n"] += 1
             if o["confidence"] > h["o"]["confidence"]: h["o"], h["f"] = o, i
     out = []
     for h in hits.values():
